@@ -16,7 +16,8 @@ st.write(
 # ---- File upload (CSV + Excel) ----
 uploaded = st.file_uploader("Upload file", type=["csv", "xlsx", "xls"])
 
-def load_df(file) -> pd.DataFrame:
+def load_df(file):
+    """Load CSV or Excel into a DataFrame."""
     if file is None:
         return None
     name = file.name.lower()
@@ -28,33 +29,34 @@ def load_df(file) -> pd.DataFrame:
         raise ValueError("Unsupported file type. Please upload CSV or Excel.")
 
 def coerce_numeric(series: pd.Series) -> pd.Series:
+    """Convert values to numeric where possible (non-numeric -> NaN)."""
     return pd.to_numeric(series, errors="coerce")
 
 if uploaded:
-    # Load
+    # 1) Load
     try:
         df = load_df(uploaded)
     except Exception as e:
         st.error(f"Could not read the file: {e}")
         st.stop()
 
-    # Basic cleaning
+    # 2) Basic cleaning
     df = df.dropna(how="all")
     if df.shape[1] < 2:
         st.error("File must have at least two columns.")
         st.stop()
 
-    # Column roles
+    # 3) Column roles
     period_col = df.columns[0]
     value_col = df.columns[1]
 
-    # Coerce numeric values
+    # 4) Coerce numeric values
     vals = coerce_numeric(df[value_col])
     if vals.isna().all():
         st.error(f"Second column ('{value_col}') must contain numbers.")
         st.stop()
 
-    # Parse first column as dates if possible
+    # 5) Parse first column as dates if possible
     try:
         df[period_col] = pd.to_datetime(df[period_col], errors="ignore")
     except Exception:
@@ -90,14 +92,17 @@ if uploaded:
     # ---------- Pro: Board-Pack PDF (ASCII-safe) ----------
     class BoardPDF(FPDF):
         def header(self):
+            # clean header
             pass
+
         def footer(self):
             self.set_y(-15)
             self.set_font("Arial", size=8)
             self.cell(0, 10, "Page %s" % self.page_no(), 0, 0, "C")
 
-    def save_trend_image(series: pd.Series):
-        if series is None or series.empty:
+    def save_trend_image(series):
+        """Render trend series to a temporary PNG and return its path."""
+        if series is None or len(series) == 0:
             return None
         fig, ax = plt.subplots()
         ax.plot(series.index, series.values)
@@ -124,7 +129,8 @@ if uploaded:
 
         # EXEC SUMMARY
         pdf.add_page()
-        pdf.set_font("Arial", "B", 16); pdf.cell(0, 10, "Executive Summary", ln=1)
+        pdf.set_font("Arial", "B", 16)
+        pdf.cell(0, 10, "Executive Summary", ln=1)
         pdf.set_font("Arial", "", 12)
         pdf.multi_cell(
             0, 8,
@@ -139,4 +145,58 @@ if uploaded:
             df2 = df2.dropna(subset=[value_col]).sort_values(by=period_col)
             df2["MoM_change"] = df2[value_col].diff()
 
-            top_u_
+            top_ups = df2.nlargest(3, "MoM_change")[[period_col, "MoM_change"]].dropna()
+            top_downs = df2.nsmallest(3, "MoM_change")[[period_col, "MoM_change"]].dropna()
+
+            pdf.ln(2)
+            pdf.set_font("Arial", "B", 14)
+            pdf.cell(0, 10, "Variance Highlights (MoM)", ln=1)
+            pdf.set_font("Arial", "", 12)
+            if not top_ups.empty:
+                pdf.cell(0, 8, "Largest increases:", ln=1)
+                for _, r in top_ups.iterrows():
+                    pdf.cell(0, 8, "- %s: +%s" % (str(r[period_col]), f"{float(r['MoM_change']):,.2f}"), ln=1)
+            if not top_downs.empty:
+                pdf.cell(0, 8, "Largest decreases:", ln=1)
+                for _, r in top_downs.iterrows():
+                    pdf.cell(0, 8, "- %s: %s" % (str(r[period_col]), f"{float(r['MoM_change']):,.2f}"), ln=1)
+        except Exception:
+            pdf.cell(0, 8, "Variance section unavailable for this dataset.", ln=1)
+
+        # TREND IMAGE
+        img_path = save_trend_image(trend_series) if trend_series is not None else None
+        if img_path and os.path.exists(img_path):
+            pdf.add_page()
+            pdf.set_font("Arial", "B", 14)
+            pdf.cell(0, 10, "Trend", ln=1)
+            pdf.image(img_path, w=180)
+            try:
+                os.remove(img_path)
+            except Exception:
+                pass
+
+        # APPENDIX (first 20 rows)
+        pdf.add_page()
+        pdf.set_font("Arial", "B", 14)
+        pdf.cell(0, 10, "Appendix: Sample Data (first 20 rows)", ln=1)
+        pdf.set_font("Arial", "", 10)
+        sample = df.head(20).copy()
+        for _, row in sample.iterrows():
+            line = " | ".join(str(x) for x in row.tolist())
+            pdf.multi_cell(0, 6, line)
+
+        out_path = "board_pack.pdf"
+        pdf.output(out_path)
+        return out_path
+
+    st.divider()
+    if st.button("Create Board-Pack PDF (Pro)"):
+        try:
+            pdf_path = build_board_pack(df, period_col, value_col, total, avg, maxv, trend)
+            with open(pdf_path, "rb") as f:
+                st.download_button("Download Board-Pack PDF", f, file_name="board_pack.pdf")
+        except Exception as e:
+            st.error(f"Could not create PDF: {e}")
+
+else:
+    st.info("Upload a CSV or Excel file to continue.")
