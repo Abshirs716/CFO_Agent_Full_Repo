@@ -9,15 +9,14 @@ st.set_page_config(page_title="CFO Agent Dashboard", layout="wide")
 st.title("🤖 CFO Agent Dashboard")
 
 st.write(
-    "Upload a **CSV** or **Excel (.xlsx/.xls)** with two columns: "
+    "Upload a CSV or Excel (.xlsx/.xls) with two columns: "
     "a date/period column and a numeric amount column."
 )
 
 # ---- File upload (CSV + Excel) ----
-uploaded = st.file_uploader("📥 Upload file", type=["csv", "xlsx", "xls"])
+uploaded = st.file_uploader("Upload file", type=["csv", "xlsx", "xls"])
 
 def load_df(file) -> pd.DataFrame:
-    """Load CSV or Excel into a DataFrame."""
     if file is None:
         return None
     name = file.name.lower()
@@ -26,10 +25,9 @@ def load_df(file) -> pd.DataFrame:
     elif name.endswith(".xlsx") or name.endswith(".xls"):
         return pd.read_excel(file, engine="openpyxl")
     else:
-        raise ValueError("Unsupported file type. Please upload CSV or Excel (.xlsx/.xls).")
+        raise ValueError("Unsupported file type. Please upload CSV or Excel.")
 
 def coerce_numeric(series: pd.Series) -> pd.Series:
-    """Try to convert a series to numeric, keep NaN if not possible."""
     return pd.to_numeric(series, errors="coerce")
 
 if uploaded:
@@ -53,7 +51,7 @@ if uploaded:
     # Coerce numeric values
     vals = coerce_numeric(df[value_col])
     if vals.isna().all():
-        st.error(f"Second column (‘{value_col}’) must contain numbers.")
+        st.error(f"Second column ('{value_col}') must contain numbers.")
         st.stop()
 
     # Parse first column as dates if possible
@@ -75,10 +73,9 @@ if uploaded:
     c2.metric("Average", f"{avg:,.2f}")
     c3.metric("Max", f"{maxv:,.2f}")
 
-    # Trend chart (group by period column)
+    # Trend chart
     try:
         trend = df.groupby(period_col)[value_col].apply(lambda s: coerce_numeric(s).sum())
-        # If date-like, sort chronologically
         try:
             trend.index = pd.to_datetime(trend.index)
             trend = trend.sort_index()
@@ -90,18 +87,16 @@ if uploaded:
         trend = None
         st.warning(f"Could not plot trend: {e}")
 
-    # ---------- Pro: Board-Pack PDF ----------
+    # ---------- Pro: Board-Pack PDF (ASCII-safe) ----------
     class BoardPDF(FPDF):
         def header(self):
-            # Leave header empty for a clean look
             pass
-
         def footer(self):
             self.set_y(-15)
             self.set_font("Arial", size=8)
-            self.cell(0, 10, f"Page {self.page_no()}", 0, 0, "C")
+            self.cell(0, 10, "Page %s" % self.page_no(), 0, 0, "C")
 
-    def save_trend_image(series: pd.Series) -> str | None:
+    def save_trend_image(series: pd.Series):
         if series is None or series.empty:
             return None
         fig, ax = plt.subplots()
@@ -115,9 +110,7 @@ if uploaded:
         plt.close(fig)
         return tmp_img.name
 
-    def build_board_pack(df: pd.DataFrame, period_col: str, value_col: str,
-                         total: float, avg: float, maxv: float,
-                         trend_series: pd.Series | None) -> str:
+    def build_board_pack(df, period_col, value_col, total, avg, maxv, trend_series):
         pdf = BoardPDF()
         pdf.set_auto_page_break(auto=True, margin=15)
 
@@ -133,70 +126,17 @@ if uploaded:
         pdf.add_page()
         pdf.set_font("Arial", "B", 16); pdf.cell(0, 10, "Executive Summary", ln=1)
         pdf.set_font("Arial", "", 12)
-        pdf.multi_cell(0, 8,
-            f"• Total: {total:,.2f}\n"
-            f"• Average: {avg:,.2f}\n"
-            f"• Max: {maxv:,.2f}\n"
+        pdf.multi_cell(
+            0, 8,
+            "- Total:  %s\n- Average: %s\n- Max:     %s" %
+            (f"{total:,.2f}", f"{avg:,.2f}", f"{maxv:,.2f}")
         )
 
         # VARIANCE (Month-over-Month)
         try:
             df2 = df[[period_col, value_col]].copy()
             df2[value_col] = coerce_numeric(df2[value_col])
-            df2 = df2.dropna(subset=[value_col])
-            df2 = df2.sort_values(by=period_col)
-            df2["MoM Δ"] = df2[value_col].diff()
-            top_ups = df2.nlargest(3, "MoM Δ")[[period_col, "MoM Δ"]].dropna()
-            top_downs = df2.nsmallest(3, "MoM Δ")[[period_col, "MoM Δ"]].dropna()
+            df2 = df2.dropna(subset=[value_col]).sort_values(by=period_col)
+            df2["MoM_change"] = df2[value_col].diff()
 
-            pdf.ln(2)
-            pdf.set_font("Arial", "B", 14); pdf.cell(0, 10, "Variance Highlights (MoM)", ln=1)
-            pdf.set_font("Arial", "", 12)
-            if not top_ups.empty:
-                pdf.cell(0, 8, "Largest increases:", ln=1)
-                for _, r in top_ups.iterrows():
-                    pdf.cell(0, 8, f"  • {r[period_col]}: +{float(r['MoM Δ']):,.2f}", ln=1)
-            if not top_downs.empty:
-                pdf.cell(0, 8, "Largest decreases:", ln=1)
-                for _, r in top_downs.iterrows():
-                    pdf.cell(0, 8, f"  • {r[period_col]}: {float(r['MoM Δ']):,.2f}", ln=1)
-        except Exception:
-            pdf.cell(0, 8, "Variance section unavailable for this dataset.", ln=1)
-
-        # TREND IMAGE
-        img_path = save_trend_image(trend_series) if trend_series is not None else None
-        if img_path and os.path.exists(img_path):
-            pdf.add_page()
-            pdf.set_font("Arial", "B", 14); pdf.cell(0, 10, "Trend", ln=1)
-            pdf.image(img_path, w=180)
-            try:
-                os.remove(img_path)
-            except Exception:
-                pass
-
-        # APPENDIX (first 20 rows)
-        pdf.add_page()
-        pdf.set_font("Arial", "B", 14); pdf.cell(0, 10, "Appendix: Sample Data (first 20 rows)", ln=1)
-        pdf.set_font("Arial", "", 10)
-        sample = df.head(20).copy()
-        # Render as simple text table
-        for i, row in sample.iterrows():
-            line = " | ".join(str(x) for x in row.tolist())
-            pdf.multi_cell(0, 6, line)
-
-        # Output
-        out_path = "board_pack.pdf"
-        pdf.output(out_path)
-        return out_path
-
-    st.divider()
-    if st.button("📘 Create Board-Pack PDF (Pro)"):
-        try:
-            pdf_path = build_board_pack(df, period_col, value_col, total, avg, maxv, trend)
-            with open(pdf_path, "rb") as f:
-                st.download_button("Download Board-Pack PDF", f, file_name="board_pack.pdf")
-        except Exception as e:
-            st.error(f"Could not create PDF: {e}")
-
-else:
-    st.info("Upload a CSV or Excel file to continue.")
+            top_u_
