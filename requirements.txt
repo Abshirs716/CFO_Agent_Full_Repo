@@ -3,3 +3,4 @@ pandas
 matplotlib
 fpdf
 python-dotenv
+openpyxl
